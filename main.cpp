@@ -1,4 +1,6 @@
-﻿#include <Windows.h>
+#include <Windows.h>
+#include <cstdio>
+#include <cstdlib>
 
 #include <atlbase.h>
 #include <d3d11.h>
@@ -8,13 +10,25 @@
 #pragma comment (lib, "dxgi.lib")
 #pragma comment (lib, "dxguid.lib")
 
-int main (int argc, void** argv)
+int main (int argc, char** argv)
 {
   float max_cll = 0.0f;
 
+  // Output is otherwise lost when stdout is redirected
+  setvbuf (stdout, nullptr, _IONBF, 0);
+
   if (argc == 2)
   {
-    max_cll = atof ((const char *)(argv [1]));
+    char*  end    = nullptr;
+    double parsed = strtod (argv [1], &end);
+
+    if (end == argv [1] || *end != '\0' || parsed <= 0.0 || parsed > 10000.0)
+    {
+      printf ("Usage: %s [MaxCLL in nits, 0 < value <= 10000]\n", argv [0]);
+      return 1;
+    }
+
+    max_cll = static_cast <float> (parsed);
   }
 
   CComPtr <IDXGIFactory>                         pFactory;
@@ -39,14 +53,32 @@ int main (int argc, void** argv)
       if (pOutput6 != nullptr)
       {
         DXGI_OUTPUT_DESC1    outDesc1 = { };
-        pOutput6->GetDesc1 (&outDesc1);
+        if (FAILED (pOutput6->GetDesc1 (&outDesc1)))
+        {
+          printf ("Skipped Display: GetDesc1 failed\n");
+          pOutput = nullptr;
+          continue;
+        }
 
         UINT Width  = outDesc1.DesktopCoordinates.right  -
                       outDesc1.DesktopCoordinates.left;
         UINT Height = outDesc1.DesktopCoordinates.bottom -
                       outDesc1.DesktopCoordinates.top;
 
-        if (outDesc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+        if (outDesc1.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+        {
+          printf ("Skipped Display: %ws (ColorSpace=%d, not HDR10)\n",
+                  outDesc1.DeviceName, outDesc1.ColorSpace);
+        }
+
+        else if (max_cll == 0.0f && outDesc1.MaxLuminance <= 0.0f)
+        {
+          printf ("Skipped Display: %ws (reports MaxLuminance=%f; pass a "
+                  "MaxCLL override on the command line)\n",
+                  outDesc1.DeviceName, outDesc1.MaxLuminance);
+        }
+
+        else
         {
           HWND hWnd =
             CreateWindow (
@@ -57,6 +89,14 @@ int main (int argc, void** argv)
                                      Width, Height,
                                       0, 0, 0, 0
             );
+
+          if (hWnd == nullptr)
+          {
+            printf ("Skipped Display: %ws (CreateWindow failed: %lu)\n",
+                    outDesc1.DeviceName, GetLastError ());
+            pOutput = nullptr;
+            continue;
+          }
 
           DXGI_SWAP_CHAIN_DESC
             swapDesc                        = { };
@@ -90,15 +130,19 @@ int main (int argc, void** argv)
                 outDesc1.MaxLuminance = max_cll;
               }
 
+              // Mastering luminance is in units of 0.0001 nits; MaxCLL and
+              //   MaxFALL are in whole nits and only 16 bits wide.
+              float  peak_nits = outDesc1.MaxLuminance;
+              UINT16 peak_u16  = static_cast <UINT16> (
+                peak_nits > 65535.0f ? 65535.0f : peak_nits + 0.5f );
+
               DXGI_HDR_METADATA_HDR10
                 metadata                           = { };
                 metadata.MinMasteringLuminance     =  0;
                 metadata.MaxMasteringLuminance     =
-                  static_cast <UINT>   (outDesc1.MaxLuminance * 10000);
-                metadata.MaxFrameAverageLightLevel =
-                  static_cast <UINT16> (outDesc1.MaxLuminance * 10000);
-                metadata.MaxContentLightLevel      =
-                  static_cast <UINT16> (outDesc1.MaxLuminance * 10000);
+                  static_cast <UINT>   (peak_nits * 10000.0f);
+                metadata.MaxFrameAverageLightLevel = peak_u16;
+                metadata.MaxContentLightLevel      = peak_u16;
                 metadata.WhitePoint   [0]          =
                   static_cast <UINT16> (outDesc1.WhitePoint   [0] * 50000.0F);
                 metadata.WhitePoint   [1]          =
@@ -116,9 +160,12 @@ int main (int argc, void** argv)
                 metadata.GreenPrimary [1]          =
                   static_cast <UINT16> (outDesc1.GreenPrimary [1] * 50000.0F);
 
-              pSwapChain4->SetColorSpace1 (
-                DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-              );
+              if (FAILED (pSwapChain4->SetColorSpace1 (
+                            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 )))
+              {
+                printf (" Warning: SetColorSpace1 failed on %ws\n",
+                        outDesc1.DeviceName);
+              }
 
               if ( SUCCEEDED (
                      pSwapChain4->SetFullscreenState (TRUE, nullptr))
@@ -131,17 +178,37 @@ int main (int argc, void** argv)
                   modeDesc.Height = Height;
                   modeDesc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
 
-                pOutput6->FindClosestMatchingMode (&modeDesc,
-                                                   &modeDesc, nullptr);
-                                                    modeDesc.RefreshRate =
-                                                  { modeDesc.RefreshRate.Numerator/3,
-                                                    modeDesc.RefreshRate.Denominator };
-                pOutput6->FindClosestMatchingMode (&modeDesc,
-                                                    &modeDesc, nullptr);
-                pSwapChain4->ResizeTarget         (&modeDesc);
+                HRESULT hrMode =
+                  pOutput6->FindClosestMatchingMode (&modeDesc,
+                                                     &modeDesc, nullptr);
+                if (SUCCEEDED (hrMode))
+                {
+                  modeDesc.RefreshRate =
+                    { modeDesc.RefreshRate.Numerator/3,
+                      modeDesc.RefreshRate.Denominator };
+
+                  hrMode =
+                    pOutput6->FindClosestMatchingMode (&modeDesc,
+                                                       &modeDesc, nullptr);
+                }
+
+                if (SUCCEEDED (hrMode))
+                  hrMode = pSwapChain4->ResizeTarget (&modeDesc);
+
+                if (FAILED (hrMode))
+                {
+                  printf (" Warning: display mode switch failed on %ws "
+                          "(0x%08X)\n", outDesc1.DeviceName, hrMode);
+                }
 
                 Sleep                (  25);
                 pSwapChain4->Present (1, 0);
+              }
+
+              else
+              {
+                printf (" Warning: SetFullscreenState failed on %ws\n",
+                        outDesc1.DeviceName);
               }
 
               if ( SUCCEEDED (
@@ -151,12 +218,22 @@ int main (int argc, void** argv)
                  )
               {
                 printf ("Sanitized Display: %ws\n", outDesc1.DeviceName);
-                printf (" MaxCLL=%f nits\n\n",      outDesc1.MaxLuminance);
+                printf (" MaxCLL=%u nits\n\n",      peak_u16);
 
                 pSwapChain4->Present (1, 0);
                                Sleep ( 250);
                 pSwapChain4->Present (1, 0);
               }
+
+              else
+              {
+                printf ("Failed to set HDR metadata on %ws\n",
+                        outDesc1.DeviceName);
+              }
+
+              // Releasing a swap chain that is still fullscreen terminates
+              //   the process, so no further displays would be processed.
+              pSwapChain4->SetFullscreenState (FALSE, nullptr);
             }
           }
 
@@ -169,4 +246,6 @@ int main (int argc, void** argv)
 
     pAdapter = nullptr;
   }
+
+  return 0;
 }
