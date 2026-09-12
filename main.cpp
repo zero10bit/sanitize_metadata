@@ -168,6 +168,10 @@ int main (int argc, char** argv)
                                Sleep ( 250);
                 pSwapChain4->Present (1, 0);
               }
+
+              // Releasing a swap chain that is still fullscreen terminates
+              //   the process, so no further displays would be processed.
+              pSwapChain4->SetFullscreenState (FALSE, nullptr);
             }
           }
 
