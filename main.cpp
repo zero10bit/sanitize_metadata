@@ -1,4 +1,6 @@
-﻿#include <Windows.h>
+#include <Windows.h>
+#include <cstdio>
+#include <cstdlib>
 
 #include <atlbase.h>
 #include <d3d11.h>
@@ -8,13 +10,16 @@
 #pragma comment (lib, "dxgi.lib")
 #pragma comment (lib, "dxguid.lib")
 
-int main (int argc, void** argv)
+int main (int argc, char** argv)
 {
   float max_cll = 0.0f;
 
+  // Output is otherwise lost when stdout is redirected
+  setvbuf (stdout, nullptr, _IONBF, 0);
+
   if (argc == 2)
   {
-    max_cll = atof ((const char *)(argv [1]));
+    max_cll = static_cast <float> (atof (argv [1]));
   }
 
   CComPtr <IDXGIFactory>                         pFactory;
@@ -46,7 +51,13 @@ int main (int argc, void** argv)
         UINT Height = outDesc1.DesktopCoordinates.bottom -
                       outDesc1.DesktopCoordinates.top;
 
-        if (outDesc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+        if (outDesc1.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+        {
+          printf ("Skipped Display: %ws (ColorSpace=%d, not HDR10)\n",
+                  outDesc1.DeviceName, outDesc1.ColorSpace);
+        }
+
+        else
         {
           HWND hWnd =
             CreateWindow (
@@ -169,4 +180,6 @@ int main (int argc, void** argv)
 
     pAdapter = nullptr;
   }
+
+  return 0;
 }
